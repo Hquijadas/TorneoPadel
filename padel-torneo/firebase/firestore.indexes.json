@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "parejas",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "categoria",        "order": "ASCENDING" },
+        { "fieldPath": "fechaInscripcion", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "grupos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "categoria",    "order": "ASCENDING" },
+        { "fieldPath": "numeroGrupo",  "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
