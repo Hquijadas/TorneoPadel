@@ -1,0 +1,219 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: parejas
+// Document ID: auto-generated
+// Fields:
+//   - jugador1: map (required)
+//       - nombre:    string (required, 1–80 chars)
+//       - apellidos: string (required, 1–120 chars)
+//       - telefono:  string (required, 6–20 chars)
+//   - jugador2: map (required, same shape as jugador1)
+//   - categoria: string (required) — one of:
+//       'Masculino Oro' | 'Femenino Oro' | 'Masculino Plata' | 'Femenino Plata'
+//   - estado: string (required, immutable after create) — fixed value 'inscrita'
+//   - fechaInscripcion: timestamp (required, immutable, must equal request.time ± 5 min)
+//
+// Access rules:
+//   read   → anyone (unauthenticated)
+//   create → anyone (unauthenticated), with full field validation
+//   update → authenticated users only, with full field validation +
+//             immutable-field protection (estado, fechaInscripcion)
+//   delete → authenticated users only
+//
+// ---------------------------------------------------------------
+//
+// Collection: grupos
+// Document ID: auto-generated
+// Fields:
+//   - categoria:   string (required, 1–60 chars)
+//   - numeroGrupo: int    (required, >= 1)
+//   - parejas:     list   (required, max 20 items)
+//   - partidos:    list   (required, max 100 items)
+//   - createdAt:   timestamp (required, immutable)
+//
+// Access rules:
+//   read   → anyone (unauthenticated)
+//   create → authenticated users only, with full field validation
+//   update → authenticated users only, with full field validation +
+//             immutable-field protection (createdAt)
+//   delete → authenticated users only
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // Default deny — explicit allow rules below override this.
+    // =========================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================
+    // Helper Functions
+    // =========================================================
+
+    // Returns true when the request is made by a signed-in user.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Returns true when all expected top-level keys are present
+    // and no extra keys exist (strict schema enforcement).
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Returns true when a timestamp is within ±5 minutes of
+    // the server evaluation time (prevents past/future injection).
+    function isRecent(ts) {
+      return ts is timestamp
+          && ts > request.time - duration.value(5, 'm')
+          && ts <= request.time + duration.value(5, 'm');
+    }
+
+    // Returns true when a string value is present, is a string,
+    // and its length is within [minLen, maxLen].
+    function validStr(value, minLen, maxLen) {
+      return value is string
+          && value.size() >= minLen
+          && value.size() <= maxLen;
+    }
+
+    // =========================================================
+    // Domain Validator: jugador map
+    // Validates a player sub-map independently of whether it
+    // comes from request.resource.data.jugador1 or .jugador2.
+    // =========================================================
+    function isValidJugador(j) {
+      return j is map
+          // Exactly the three expected keys — no extras.
+          && j.keys().hasOnly(['nombre', 'apellidos', 'telefono'])
+          && j.keys().hasAll(['nombre', 'apellidos', 'telefono'])
+          // nombre: non-empty, max 80 chars
+          && validStr(j.nombre,    1, 80)
+          // apellidos: non-empty, max 120 chars
+          && validStr(j.apellidos, 1, 120)
+          // telefono: 6–20 chars (digits, +, spaces, dashes)
+          && validStr(j.telefono,  6, 20);
+    }
+
+    // =========================================================
+    // Domain Validator: parejas document
+    // Called for BOTH create and update to eliminate the
+    // "Update Bypass" vulnerability.
+    // =========================================================
+    function isValidPareja(data) {
+      let validCategorias = [
+        'Masculino Oro',
+        'Femenino Oro',
+        'Masculino Plata',
+        'Femenino Plata'
+      ];
+      return
+        // Strict schema — exactly these five top-level fields.
+        hasOnlyAllowedFields(['jugador1', 'jugador2', 'categoria', 'estado', 'fechaInscripcion'])
+        && data.keys().hasAll(['jugador1', 'jugador2', 'categoria', 'estado', 'fechaInscripcion'])
+        // Validate both player maps.
+        && isValidJugador(data.jugador1)
+        && isValidJugador(data.jugador2)
+        // Categoria must be one of the four enum values.
+        && data.categoria in validCategorias
+        // Estado must always be 'inscrita' (enforced on create;
+        // kept immutable on update via explicit field comparison).
+        && data.estado == 'inscrita'
+        // fechaInscripcion must be a timestamp.
+        && data.fechaInscripcion is timestamp;
+    }
+
+    // =========================================================
+    // Domain Validator: grupos document
+    // Called for BOTH create and update.
+    // =========================================================
+    function isValidGrupo(data) {
+      return
+        // Strict schema — exactly these five top-level fields.
+        hasOnlyAllowedFields(['categoria', 'numeroGrupo', 'parejas', 'partidos', 'createdAt'])
+        && data.keys().hasAll(['categoria', 'numeroGrupo', 'parejas', 'partidos', 'createdAt'])
+        // categoria: non-empty string, max 60 chars.
+        && validStr(data.categoria, 1, 60)
+        // numeroGrupo: integer >= 1.
+        && data.numeroGrupo is int
+        && data.numeroGrupo >= 1
+        // parejas: list, max 20 items (e.g. up to 20 team refs).
+        && data.parejas is list
+        && data.parejas.size() <= 20
+        // partidos: list, max 100 match records.
+        && data.partidos is list
+        && data.partidos.size() <= 100
+        // createdAt: must be a timestamp.
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================
+    // Collection: parejas
+    // =========================================================
+    match /parejas/{parejaId} {
+
+      // Anyone (unauthenticated) may read individual documents
+      // or list the entire collection.
+      allow read: if true;
+
+      // Anyone may register a new pareja, but the payload must
+      // pass full validation AND fechaInscripcion must be recent
+      // (prevents backdating registrations).
+      allow create: if
+        isValidPareja(request.resource.data)
+        && isRecent(request.resource.data.fechaInscripcion);
+
+      // Only authenticated users may update a document.
+      // The validator is called again to prevent the Update Bypass
+      // vulnerability (e.g., injecting invalid data after a valid create).
+      // In addition, immutable fields (estado, fechaInscripcion) must not
+      // change.
+      allow update: if
+        isAuthenticated()
+        && isValidPareja(request.resource.data)
+        // Protect immutable fields: estado and fechaInscripcion must
+        // stay exactly as they were when the document was created.
+        && request.resource.data.estado           == resource.data.estado
+        && request.resource.data.fechaInscripcion == resource.data.fechaInscripcion;
+
+      // Only authenticated users may delete a registration.
+      allow delete: if isAuthenticated();
+    }
+
+    // =========================================================
+    // Collection: grupos
+    // =========================================================
+    match /grupos/{grupoId} {
+
+      // Anyone (unauthenticated) may read tournament group data.
+      allow read: if true;
+
+      // Only authenticated users (admins / organizers) may create
+      // a group. createdAt must be a recent server-time timestamp.
+      allow create: if
+        isAuthenticated()
+        && isValidGrupo(request.resource.data)
+        && isRecent(request.resource.data.createdAt);
+
+      // Only authenticated users may update a group.
+      // The validator is applied again (Update Bypass protection).
+      // createdAt is immutable after creation.
+      allow update: if
+        isAuthenticated()
+        && isValidGrupo(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt;
+
+      // Only authenticated users may delete a group.
+      allow delete: if isAuthenticated();
+    }
+
+  }
+}
